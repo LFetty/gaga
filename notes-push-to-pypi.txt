@@ -1,0 +1,26 @@
+
+
+
+
+Create distrib
+--> need to change version number
+
+# build
+python3 setup.py sdist bdist_wheel
+
+# clean
+clean dist folder
+
+# upload test
+twine upload --repository-url https://test.pypi.org/legacy/ dist/*
+
+# real upload
+twine upload dist/*
+
+(dsarrut lakc1919)
+
+# install to test
+pip3 install --index-url https://test.pypi.org/simple/ garf
+
+
+
