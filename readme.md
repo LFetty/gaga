@@ -1,4 +1,9 @@
+# added functionality
 
+conditional GAN with spectral norm and running average model + non-saturated loss function with R1
+
+
+---------------------------------------------
 GAGA = GAN for GATE
 
 ```pip install gaga-phsp```
