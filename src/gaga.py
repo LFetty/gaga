@@ -26,6 +26,26 @@ import matplotlib.animation as animation
 
 
 # -----------------------------------------------------------------------------
+
+@torch.jit.script
+def Mish(input):
+    return input * torch.tanh(F.softplus(input))
+
+def select_norm(dim, norm_type):
+    if norm_type == 'batch':
+        return nn.BatchNorm1d(dim)
+    elif norm_type == 'layer':
+        return nn.LayerNorm(dim)
+    elif norm_type == 'group':
+        return nn.GroupNorm(20, dim)
+
+def select_act(act_type):
+    if act_type == 'relu':
+        return F.relu
+    elif act_type == 'Mish':
+        return Mish
+
+
 class Discriminator(nn.Module):
     '''
     Discriminator: D(x, θD) -> probability that x is real data
@@ -43,44 +63,104 @@ class Discriminator(nn.Module):
         super(Discriminator, self).__init__()
 
         self.params = params
-        x_dim = params['x_dim']
-        d_dim = params['d_dim']
-        self.d_layers = params['d_layers']
-        self.wasserstein = (params['type'] == 'wasserstein') or (params['type'] == 'gradient_penalty')
+        x_dim = params.x_dim
+        d_dim = params.d_dim
+        self.d_layers = params.d_layers
+        self.wasserstein = False#(params['type'] == 'wasserstein') or (params['type'] == 'gradient_penalty')
 
         self.map1 = nn.Linear(x_dim, d_dim)
         self.maps = nn.ModuleList()
         self.norms = nn.ModuleList()
 
-        self.activ = F.relu
-        if 'leaky_relu' in params:
-            self.activ = F.leaky_relu
+        self.activ = select_act(params.act)#F.relu
+        #if 'leaky_relu' in params:
+        #    self.activ = F.leaky_relu
 
         for i in range(self.d_layers):
-            self.maps.append(nn.Linear(d_dim,d_dim))
-            self.norms.append(nn.LayerNorm(d_dim))
+            if self.params.d_norm == True and self.params.d_norm_type == 'spectral':
+                self.maps.append(torch.nn.utils.spectral_norm(nn.Linear(d_dim,d_dim)))
+            else:
+                self.maps.append(nn.Linear(d_dim, d_dim))
+            self.norms.append(select_norm(d_dim, params.d_norm_type))#nn.LayerNorm(d_dim))
 
         self.map3 = nn.Linear(d_dim, 1)
 
     def forward(self, x):
         x = self.activ(self.map1(x))
 
-        if self.params['layer_norm'] == True:
+        if self.params.d_norm == True and self.params.d_norm_type != 'spectral':
             for i in range(self.d_layers):
                 x = self.activ(self.norms[i](self.maps[i](x)))
         else:
             for i in range(self.d_layers):
                 x = self.activ(self.maps[i](x))
 
-        if (self.wasserstein):
+        #if (self.wasserstein):
             # NO SIGMOID with Wasserstein
             # https://paper.dropbox.com/doc/Wasserstein-GAN--AZxqBJuXjF5jf3zyCdJAVqEMAg-GvU0p2V9ThzdwY3BbhoP7
-            x = self.map3(x)
-        else:
-            x = torch.sigmoid(self.map3(x))  # sigmoid needed to output probabilities 0-1
+        x = self.map3(x)
+        #else:
+        #    x = torch.sigmoid(self.map3(x))  # sigmoid needed to output probabilities 0-1
         return x
 
+class Discriminator_con(nn.Module):
+    '''
+    Discriminator: D(x, θD) -> probability that x is real data
+    or with Wasserstein GAN :
+    Discriminator is the Critic D(x, θD) -> Wasserstein distance
 
+    The discriminator takes in both real and fake input data and returns
+    probabilities, a number between 0 and 1, with 1 representing a prediction
+    of authenticity and 0 representing fake.
+
+    At Nash equilibrium, half of input will be real, half fake: D(x) = 1/2
+    '''
+
+    def __init__(self, params):
+        super(Discriminator_con, self).__init__()
+
+
+        self.params = params
+        x_dim = params.x_dim
+        d_dim = params.d_dim
+        self.d_layers = params.d_layers
+        self.wasserstein = False#(params['type'] == 'wasserstein') or (params['type'] == 'gradient_penalty')
+        self.emb = nn.Embedding(self.params.classes, self.params.classes)
+
+        self.map1 = nn.Linear(x_dim+self.params.classes, d_dim)
+        self.maps = nn.ModuleList()
+        self.norms = nn.ModuleList()
+
+        self.activ = select_act(params.act)#F.relu
+        #if 'leaky_relu' in params:
+        #    self.activ = F.leaky_relu
+
+        for i in range(self.d_layers):
+            if self.params.d_norm == True and self.params.d_norm_type == 'spectral':
+                self.maps.append(torch.nn.utils.spectral_norm(nn.Linear(d_dim,d_dim)))
+            else:
+                self.maps.append(nn.Linear(d_dim, d_dim))
+            self.norms.append(select_norm(d_dim, params.d_norm_type))#nn.LayerNorm(d_dim))
+
+        self.map3 = nn.Linear(d_dim, 1)
+
+    def forward(self, x, labels):
+        x = self.activ(self.map1(torch.cat((x, self.emb(labels)), -1)))
+
+        if self.params.d_norm == True and self.params.d_norm_type != 'spectral':
+            for i in range(self.d_layers):
+                x = self.activ(self.norms[i](self.maps[i](x)))
+        else:
+            for i in range(self.d_layers):
+                x = self.activ(self.maps[i](x))
+
+        #if (self.wasserstein):
+            # NO SIGMOID with Wasserstein
+            # https://paper.dropbox.com/doc/Wasserstein-GAN--AZxqBJuXjF5jf3zyCdJAVqEMAg-GvU0p2V9ThzdwY3BbhoP7
+        x = self.map3(x)
+        #else:
+        #    x = torch.sigmoid(self.map3(x))  # sigmoid needed to output probabilities 0-1
+        return x
 
 # -----------------------------------------------------------------------------
 class Generator(nn.Module):
@@ -95,24 +175,28 @@ class Generator(nn.Module):
         super(Generator, self).__init__()
 
         self.params = params
-        z_dim = self.params['z_dim']
-        self.x_dim = self.params['x_dim']
-        g_dim = self.params['g_dim']
-        self.g_layers = self.params['g_layers']
-        self.cmin = cmin
-        self.cmax = cmax
+        z_dim = self.params.z_dim
+        self.x_dim = self.params.x_dim
+        g_dim = self.params.g_dim
+        self.g_layers = self.params.g_layers
+        self.cmin = torch.Tensor(cmin).cuda()
+        self.cmax = torch.Tensor(cmax).cuda()
+        self.wasserstein = False
+
 
         self.map1 = nn.Linear(z_dim, g_dim)
         self.maps = nn.ModuleList()
+        self.norms = nn.ModuleList()
 
         for i in range(self.g_layers):
             self.maps.append(nn.Linear(g_dim, g_dim))
+            self.norms.append(select_norm(g_dim, params.g_norm_type))
 
         self.map3 = nn.Linear(g_dim, self.x_dim)
 
-        self.activ = F.relu
-        if 'leaky_relu' in params:
-            self.activ = F.leaky_relu
+        self.activ = select_act(params.act)#F.relu
+        #if 'leaky_relu' in params:
+        #    self.activ = F.leaky_relu
 
         # initialisation
         for p in self.parameters():
@@ -123,15 +207,87 @@ class Generator(nn.Module):
 
     def forward(self, x):
         x = self.activ(self.map1(x))
-        for i in range(self.g_layers-1):
-            x = self.activ(self.maps[i](x))
+        if self.params.g_norm == True:
+            for i in range(self.g_layers):
+                x = self.activ(self.norms[i](self.maps[i](x)))
+        else:
+            for i in range(self.g_layers-1):
+                x = self.activ(self.maps[i](x))
 
-        x = self.maps[self.g_layers-1](x)  # last one
-        x = torch.sigmoid(x) # to output probability within [0-1]
+            x = self.maps[self.g_layers-1](x)  # last one
+            x = torch.sigmoid(x) # to output probability within [0-1]
         #x = self.activ(x)
         x = self.map3(x)
 
-        # clamp values
+        #if self.wasserstein:
+            # clamp values
+        x = torch.max(x, self.cmin)
+        x = torch.min(x, self.cmax)
+
+        return x
+
+
+
+# -----------------------------------------------------------------------------
+class Generator_con(nn.Module):
+    '''
+    Generator: G(z, θG) -> x fake samples
+
+    Create samples that are intended to come from the same distrib than the
+    training dataset. May have several z input at different layers.
+    '''
+
+    def __init__(self, params, cmin, cmax):
+        super(Generator_con, self).__init__()
+
+        self.params = params
+        z_dim = self.params.z_dim
+        self.x_dim = self.params.x_dim
+        g_dim = self.params.g_dim
+        self.g_layers = self.params.g_layers
+        self.cmin = torch.Tensor(cmin).cuda()
+        self.cmax = torch.Tensor(cmax).cuda()
+        self.wasserstein = False
+        self.emb = nn.Embedding(self.params.classes, self.params.classes)
+
+
+        self.map1 = nn.Linear(z_dim+self.params.classes, g_dim)
+        self.maps = nn.ModuleList()
+        self.norms = nn.ModuleList()
+
+        for i in range(self.g_layers):
+            self.maps.append(nn.Linear(g_dim, g_dim))
+            self.norms.append(select_norm(g_dim, params.g_norm_type))
+
+        self.map3 = nn.Linear(g_dim, self.x_dim)
+
+        self.activ = select_act(params.act)#F.relu
+        #if 'leaky_relu' in params:
+        #    self.activ = F.leaky_relu
+
+        # initialisation
+        for p in self.parameters():
+            if p.ndimension()>1:
+                nn.init.kaiming_normal_(p) ## seems better ???
+                #nn.init.xavier_normal_(p)
+                #nn.init.kaiming_uniform_(p, nonlinearity='sigmoid')
+
+    def forward(self, x, labels):
+        x = self.activ(self.map1(torch.cat((x, self.emb(labels)), -1)))
+        if self.params.g_norm == True:
+            for i in range(self.g_layers):
+                x = self.activ(self.norms[i](self.maps[i](x)))
+        else:
+            for i in range(self.g_layers-1):
+                x = self.activ(self.maps[i](x))
+
+            x = self.maps[self.g_layers-1](x)  # last one
+            x = torch.sigmoid(x) # to output probability within [0-1]
+        #x = self.activ(x)
+        x = self.map3(x)
+
+        #if self.wasserstein:
+            # clamp values
         x = torch.max(x, self.cmin)
         x = torch.min(x, self.cmax)
 
